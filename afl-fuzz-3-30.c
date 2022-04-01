@@ -105,7 +105,7 @@ u64 operator_firefly_find_bkup[operator_num];
 u64 total_firefly_found;
 u64 total_firefly_found_bkup;
 u64 fa_total_testcase_num;
-EXP_ST u64 fa_determine_stage_switch=0;
+
 
 /* Lots of globals, but mostly for the status UI and other things where it
    really makes no sense to haul them around as function parameters. */
@@ -8727,9 +8727,6 @@ static u8 calc_fitness(int tmp_firefly, char** argv)
 {
 	int key_val;
 
-  if(fa_determine_stage_switch > 0)
-    key_val = deterministic_fuzz_one(argv);
-
 	key_val = fa_havoc_fuzzing_one(tmp_firefly, argv);
 
 	return queue_cur->firefly_fitness[tmp_firefly];
@@ -9282,7 +9279,7 @@ static void usage(u8* argv0) {
        "  -t msec       - timeout for each run (auto-scaled, 50-%u ms)\n"
        "  -m megs       - memory limit for child process (%u MB)\n"
        "  -Q            - use binary-only instrumentation (QEMU mode)\n"     
-	     "  -A           - use FA fuzzing mode\n\n"
+	   "  -FA           - use FA fuzzing mode\n\n"
  
        "Fuzzing behavior settings:\n\n"
 
@@ -9968,7 +9965,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q:A:")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q:A")) > 0)
 
     switch (opt) {
 
@@ -10140,9 +10137,6 @@ int main(int argc, char** argv) {
 
 		  fuzzing_mode = 1;
 		  //use_splicing = 1;
-      if (sscanf(optarg, "%llu", &fa_determine_stage_switch) < 1 ||
-          optarg[0] == '-') FATAL("Bad syntax used for -A");
-
 		  int i;
 		  for (i = 0; i < operator_num; i++)
 		  {
@@ -10344,6 +10338,7 @@ stop_fuzzing:
   }
 
   fclose(plot_file);
+  //fclose(convergency_file);
   destroy_queue();
   destroy_extras();
   ck_free(target_path);
