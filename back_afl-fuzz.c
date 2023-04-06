@@ -85,7 +85,7 @@ double initial_beta = 1.00;
 double initial_gama = 0.000001;
 double initial_alpha = 1.00;
 double alpha_value = 1.00;
-#define ROUND_MAX 10
+#define ROUND_MAX 5
 #define firefly_num 5
 #define operator_num 18
 #define x_max 1
@@ -6817,6 +6817,11 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 						}
 					}
 				}
+        else{
+          queue_cur->was_fuzzed = 1;
+					pending_not_fuzzed--;
+					if (queue_cur->favored) pending_favored--;
+        }
 
 			}
 			new_hit_cnt = queued_paths + unique_crashes;
@@ -8747,7 +8752,7 @@ static u8 fa_updating(char** argv) {
 		{
 			end_tag = 0;
 			fitness_i = calc_fitness(firefly_i, argv);
-			for (firefly_j = 1; firefly_j < firefly_num; firefly_j++)
+			for (firefly_j = 0; firefly_j < firefly_num; firefly_j++)
 			{
 				fitness_j = calc_fitness(firefly_j, argv);
 
@@ -9279,7 +9284,7 @@ static void usage(u8* argv0) {
        "  -t msec       - timeout for each run (auto-scaled, 50-%u ms)\n"
        "  -m megs       - memory limit for child process (%u MB)\n"
        "  -Q            - use binary-only instrumentation (QEMU mode)\n"     
-	   "  -FA           - use FA fuzzing mode\n\n"
+	     "  -A           - use FA fuzzing mode\n\n"
  
        "Fuzzing behavior settings:\n\n"
 

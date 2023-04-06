@@ -75,7 +75,7 @@
 #define KEEP_UNIQUE_CRASH   5000
 
 /* Baseline number of random tweaks during a single 'havoc' stage: */
-
+// 256, 1024
 #define HAVOC_CYCLES        256
 #define HAVOC_CYCLES_INIT   1024
 
@@ -87,6 +87,11 @@
 /* Absolute minimum number of havoc cycles (after all adjustments): */
 
 #define HAVOC_MIN           16
+
+
+/* Power Schedule Divisor */
+#define POWER_BETA          1
+#define MAX_FACTOR          (POWER_BETA * 32)
 
 /* Maximum stacking for havoc-stage tweaks. The actual value is calculated
    like this: 

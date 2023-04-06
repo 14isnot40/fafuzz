@@ -85,7 +85,7 @@ double initial_beta = 1.00;
 double initial_gama = 0.000001;
 double initial_alpha = 1.00;
 double alpha_value = 1.00;
-#define ROUND_MAX 10
+#define ROUND_MAX 5
 #define firefly_num 5
 #define operator_num 18
 #define x_max 1
@@ -105,7 +105,7 @@ u64 operator_firefly_find_bkup[operator_num];
 u64 total_firefly_found;
 u64 total_firefly_found_bkup;
 u64 fa_total_testcase_num;
-
+EXP_ST u64 fa_determine_stage_switch=0;
 
 /* Lots of globals, but mostly for the status UI and other things where it
    really makes no sense to haul them around as function parameters. */
@@ -128,6 +128,16 @@ static u32 hang_tmout = EXEC_TIMEOUT; /* Timeout used for hang det (ms)   */
 EXP_ST u64 mem_limit  = MEM_LIMIT;    /* Memory cap for child (MB)        */
 
 static u32 stats_update_freq = 1;     /* Stats update frequency (execs)   */
+
+static u8 schedule = 0;               /* Power schedule (default: FAST)   */
+enum {
+  /* 00 */ FAST,                      /* Exponential schedule             */
+  /* 01 */ COE,                       /* Cut-Off Exponential schedule     */
+  /* 02 */ EXPLORE,                   /* Exploration-based constant sch.  */
+  /* 03 */ LIN,                       /* Linear schedule                  */
+  /* 04 */ QUAD,                      /* Quadratic schedule               */
+  /* 05 */ EXPLOIT                    /* AFL's exploitation-based const.  */
+};
 
 EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            force_deterministic,       /* Force deterministic stages?      */
@@ -270,11 +280,13 @@ struct queue_entry {
       fs_redundant;                   /* Marked as redundant in the fs?   */
 
   u32 bitmap_size,                    /* Number of bits set in bitmap     */
+      fuzz_level,                     /* Number of fuzzing iterations     */
       exec_cksum;                     /* Checksum of the execution trace  */
 
   u64 exec_us,                        /* Execution time (us)              */
       handicap,                       /* Number of queue cycles behind    */
-      depth;                          /* Path depth                       */
+      depth,                          /* Path depth                       */
+      n_fuzz;                         /* Number of fuzz, does not overflow */
 
   u8* trace_mini;                     /* Trace bytes, if kept             */
   u32 tc_ref;                         /* Trace bytes ref count            */
@@ -1398,7 +1410,7 @@ static void cull_queue(void) {
       top_rated[i]->favored = 1;
       queued_favored++;
 
-      if (!top_rated[i]->was_fuzzed) pending_favored++;
+      if (!top_rated[i]->fuzz_level == 0) pending_favored++;
 
     }
 
@@ -3198,6 +3210,18 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
   s32 fd;
   u8  keeping = 0, res;
 
+  /* Update path frequency. */
+  u32 cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
+
+  struct queue_entry* q = queue;
+  while (q) {
+    if (q->exec_cksum == cksum)
+      q->n_fuzz = q->n_fuzz + 1;
+
+    q = q->next;
+
+  }
+
   if (fault == crash_mode) {
 
     /* Keep only if there are new bits in the map, add to queue for
@@ -4554,11 +4578,11 @@ static void show_init_stats(void) {
 
 
 /* Find first power of two greater or equal to val (assuming val under
-   2^31). */
+   2^63). */
 
-static u32 next_p2(u32 val) {
+static u64 next_p2(u64 val) {
 
-  u32 ret = 1;
+  u64 ret = 1;
   while (val > ret) ret <<= 1;
   return ret;
 
@@ -4846,6 +4870,66 @@ static u32 calculate_score(struct queue_entry* q) {
     default:        perf_score *= 5;
 
   }
+
+  u64 fuzz = q->n_fuzz;
+  u64 fuzz_total;
+
+  u32 n_paths, fuzz_mu;
+  u32 factor = 1;
+
+  switch (schedule) {
+
+    case EXPLORE: 
+      break;
+
+    case EXPLOIT:
+      factor = MAX_FACTOR;
+      break;
+
+    case COE:
+      fuzz_total = 0;
+      n_paths = 0;
+
+      struct queue_entry *queue_it = queue;	
+      while (queue_it) {
+        fuzz_total += queue_it->n_fuzz;
+        n_paths ++;
+        queue_it = queue_it->next;
+      }
+
+      fuzz_mu = fuzz_total / n_paths;
+      if (fuzz <= fuzz_mu) {
+        if (q->fuzz_level < 16)
+          factor = ((u32) (1 << q->fuzz_level));
+        else 
+          factor = MAX_FACTOR;
+      } else {
+        factor = 0;
+      }
+      break;
+    
+    case FAST:
+      if (q->fuzz_level < 16) {
+         factor = ((u32) (1 << q->fuzz_level)) / (fuzz == 0 ? 1 : fuzz); 
+      } else
+        factor = MAX_FACTOR / (fuzz == 0 ? 1 : next_p2 (fuzz));
+      break;
+
+    case LIN:
+      factor = q->fuzz_level / (fuzz == 0 ? 1 : fuzz); 
+      break;
+
+    case QUAD:
+      factor = q->fuzz_level * q->fuzz_level / (fuzz == 0 ? 1 : fuzz);
+      break;
+
+    default:
+      PFATAL ("Unkown Power Schedule");
+  }
+  if (factor > MAX_FACTOR) 
+    factor = MAX_FACTOR;
+
+  perf_score *= factor / POWER_BETA;
 
   /* Make sure that we don't go over limit. */
 
@@ -6185,7 +6269,7 @@ abandon_entry:
 }
 
 
-static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
+static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv, u32 first_met_splice) {
 	s32 len, fd, temp_len, i;
 	u8* in_buf, * out_buf, * orig_in, * eff_map = 0;
 	u64 havoc_queued, orig_hit_cnt, new_hit_cnt, cur_ms_lv;
@@ -6209,7 +6293,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 		   possibly skip to them at the expense of already-fuzzed or non-favored
 		   cases. */
 
-		if ((queue_cur->was_fuzzed || !queue_cur->favored) &&
+		if ((queue_cur->fuzz_level > 0 || !queue_cur->favored) &&
 			UR(100) < SKIP_TO_NEW_PROB) return 1;
 
 	}
@@ -6219,7 +6303,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 		   The odds of skipping stuff are higher for already-fuzzed inputs and
 		   lower for never-fuzzed entries. */
 
-		if (queue_cycle > 1 && !queue_cur->was_fuzzed) {
+		if (queue_cycle > 1 && !queue_cur->fuzz_level == 0) {
 
 			if (UR(100) < SKIP_NFAV_NEW_PROB) return 1;
 
@@ -6274,6 +6358,12 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 		if (queue_cur->cal_failed < CAL_CHANCES) {
 
+      /* Reset exec_cksum to tell calibrate_case to re-execute the testcase
+         avoiding the usage of an invalid trace_bits.
+         For more info: https://github.com/AFLplusplus/AFLplusplus/pull/425 */
+
+      queue_cur->exec_cksum = 0;
+
 			res = calibrate_case(argv, queue_cur, in_buf, queue_cycle - 1, 0);
 
 			if (res == FAULT_ERROR)
@@ -6320,7 +6410,9 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 	orig_perf = perf_score = calculate_score(queue_cur);
 
-	cur_ms_lv = get_cur_time();
+  if (perf_score == 0 && queued_paths > 10) goto fa_abandon_entry;
+
+	/*cur_ms_lv = get_cur_time();*/
 	goto pacemaker_fuzzing;
 
 	doing_det = 1;
@@ -6362,7 +6454,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 
 		s32 temp_bit_len;
     s32 temp_len_puppet;
-		cur_ms_lv = get_cur_time();
+		/*cur_ms_lv = get_cur_time();*/
 
 		{
 		fa_havoc_stage_entry:
@@ -6832,7 +6924,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 		retry_fa_splicing:
 
 			if (use_splicing && splice_cycle++ < SPLICE_CYCLES &&
-				queued_paths > 1 && queue_cur->len > 1) {
+				queued_paths > 1 && queue_cur->len > 1 && first_met_splice) {
 
 				struct queue_entry* target;
 				u32 tid, split_at;
@@ -6923,6 +7015,7 @@ static u8 fa_havoc_fuzzing_one(int tmp_firefly, char** argv) {
 					pending_not_fuzzed--;
 					if (queue_cur->favored) pending_favored--;
 				}*/
+      queue_cur->fuzz_level++;
 
 			munmap(orig_in, queue_cur->len);
 
@@ -8645,6 +8738,7 @@ static u8 best_firefly_fuzz(char** argv) {
 	double best_firefly_fitness;
 	int key_val = 0;
 	int tmp_firefly;
+  u32 first_met_splice = 1;
 	s32 i;
 
 	best_firefly_fitness = queue_cur->firefly_fitness[0];
@@ -8660,7 +8754,7 @@ static u8 best_firefly_fuzz(char** argv) {
 
 
 	local_best_firefly_mode = 1;
-	key_val = fa_havoc_fuzzing_one(tmp_firefly, argv);
+	key_val = fa_havoc_fuzzing_one(tmp_firefly, argv, first_met_splice);
 	local_best_firefly_mode = 0;
 	return key_val;
 }
@@ -8723,11 +8817,14 @@ void update_pos(int firefly_i, int firefly_j)
 }
 
 
-static u8 calc_fitness(int tmp_firefly, char** argv)
+static u8 calc_fitness(int tmp_firefly, char** argv, u32 first_met_splice)
 {
 	int key_val;
 
-	key_val = fa_havoc_fuzzing_one(tmp_firefly, argv);
+  if(fa_determine_stage_switch > 0)
+    key_val = deterministic_fuzz_one(argv);
+
+	key_val = fa_havoc_fuzzing_one(tmp_firefly, argv, first_met_splice);
 
 	return queue_cur->firefly_fitness[tmp_firefly];
 }
@@ -8738,6 +8835,7 @@ static u8 fa_updating(char** argv) {
 	int firefly_i, firefly_j, fitness_i, fitness_j, end_tag;
 	u32 tmp_round = 0;
 	u32 last_update_round = 0;
+  u32 first_met_splice = 0;
 
 	while (tmp_round < ROUND_MAX)
 	{
@@ -8746,16 +8844,18 @@ static u8 fa_updating(char** argv) {
 		for (firefly_i = 0; firefly_i < firefly_num; firefly_i++)
 		{
 			end_tag = 0;
-			fitness_i = calc_fitness(firefly_i, argv);
-			for (firefly_j = 1; firefly_j < firefly_num; firefly_j++)
+
+			fitness_i = calc_fitness(firefly_i, argv, first_met_splice);
+			for (firefly_j = 0; firefly_j < firefly_num; firefly_j++)
 			{
-				fitness_j = calc_fitness(firefly_j, argv);
+        first_met_splice = 0;
+				fitness_j = calc_fitness(firefly_j, argv, first_met_splice);
 
 				if (fitness_i < fitness_j) {
 					last_update_round = tmp_round;
 					end_tag = 1;
 					update_pos(firefly_i, firefly_j);
-					fitness_i = calc_fitness(firefly_i, argv);
+					fitness_i = calc_fitness(firefly_i, argv, first_met_splice);
 				}
 			}
 
@@ -8775,7 +8875,6 @@ static u8 fa_updating(char** argv) {
 	return 1;
 
 }
-
 
 
 void fa_initial()
@@ -9279,7 +9378,7 @@ static void usage(u8* argv0) {
        "  -t msec       - timeout for each run (auto-scaled, 50-%u ms)\n"
        "  -m megs       - memory limit for child process (%u MB)\n"
        "  -Q            - use binary-only instrumentation (QEMU mode)\n"     
-	   "  -FA           - use FA fuzzing mode\n\n"
+	     "  -A           - use FA fuzzing mode\n\n"
  
        "Fuzzing behavior settings:\n\n"
 
@@ -9965,7 +10064,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q:A")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q:A:")) > 0)
 
     switch (opt) {
 
@@ -10137,6 +10236,9 @@ int main(int argc, char** argv) {
 
 		  fuzzing_mode = 1;
 		  //use_splicing = 1;
+      if (sscanf(optarg, "%llu", &fa_determine_stage_switch) < 1 ||
+          optarg[0] == '-') FATAL("Bad syntax used for -A");
+
 		  int i;
 		  for (i = 0; i < operator_num; i++)
 		  {
@@ -10338,7 +10440,6 @@ stop_fuzzing:
   }
 
   fclose(plot_file);
-  //fclose(convergency_file);
   destroy_queue();
   destroy_extras();
   ck_free(target_path);
